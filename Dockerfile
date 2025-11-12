@@ -1,24 +1,21 @@
-# Use Node.js 18 with Bun support
-FROM node:18-slim
+# Runtime oficial de Bun (incluye el binario `bun`)
+FROM oven/bun:1.2
 
-# Install Bun
-RUN curl -fsSL https://bun.sh/install | bash
-ENV PATH="$HOME/.bun/bin:$PATH"
-
-# Set working directory
+# Directorio de trabajo
 WORKDIR /app
 
-# Copy package files
+# Copiar manifests primero para aprovechar cache
 COPY package.json bun.lock ./
 
-# Install dependencies with Bun
+# Instalar dependencias con Bun (disponible en esta imagen)
 RUN bun install
 
-# Copy source code
+# Copiar el resto del código
 COPY . .
 
-# Expose port
-EXPOSE 10000
+# Puerto expuesto (debe coincidir con PORT usado por la app / plataforma)
+EXPOSE 3000
 
-# Start command
+# Comando de inicio:
+# Usa el script "start" definido en package.json -> "bun run index.ts"
 CMD ["bun", "run", "start"]
