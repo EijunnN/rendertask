@@ -1,6 +1,17 @@
 {
-  "name": "chat",
-  "module": "index.ts",
+  "name": "modern-chat",
+  "version": "1.0.0",
+  "description": "Modern real-time chat application with dark mode UI built with Bun",
+  "main": "index.ts",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun run index.ts",
+    "build": "echo 'No build step required for Bun'",
+    "test": "echo 'Tests not implemented yet'"
+  },
+  "keywords": ["chat", "websocket", "realtime", "dark-mode", "bun"],
+  "author": "Chat Application",
+  "license": "MIT",
   "type": "module",
   "private": true,
   "devDependencies": {
