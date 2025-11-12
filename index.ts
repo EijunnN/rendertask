@@ -3,11 +3,27 @@ import { serve } from "bun";
 // Types for our chat application
 interface Message {
   id: string;
-  type: 'join' | 'leave' | 'message' | 'user-list';
+  // chat-message events + control events
+  type:
+    | 'join'
+    | 'leave'
+    | 'message'
+    | 'user-list'
+    | 'media-offer'
+    | 'media-answer'
+    | 'media-candidate'
+    | 'media-stop';
   username: string;
   content?: string;
   timestamp: number;
   room?: string;
+
+  // For WebRTC signaling (JSON strings)
+  // - media-offer / media-answer: SDP
+  // - media-candidate: ICE candidate
+  payload?: string;
+  // kind: 'screen' | 'camera'
+  mediaType?: 'screen' | 'camera';
 }
 
 interface Client {
@@ -131,7 +147,7 @@ serve({
             console.log(`${data.username} joined room: ${clientRoom}`);
             break;
 
-          case 'message':
+          case 'message': {
             const client = clients.get(ws);
             if (!client) return;
 
@@ -147,6 +163,30 @@ serve({
             broadcastToRoom(client.room, chatMessage);
             console.log(`${client.username}: ${data.content}`);
             break;
+          }
+
+          // WebRTC signaling para compartir pantalla / cámara
+          case 'media-offer':
+          case 'media-answer':
+          case 'media-candidate':
+          case 'media-stop': {
+            const client = clients.get(ws);
+            if (!client || !client.room) return;
+
+            const signal: Message = {
+              id: generateId(),
+              type: data.type,
+              username: client.username,
+              timestamp: Date.now(),
+              room: client.room,
+              payload: data.payload,
+              mediaType: data.mediaType,
+            };
+
+            // Reenviar a todos en la sala excepto el emisor
+            broadcastToRoom(client.room, signal, ws);
+            break;
+          }
 
           case 'leave':
             const leavingClient = clients.get(ws);
@@ -259,78 +299,184 @@ function getIndexHTML(): string {
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Modern Chat - Real-time Communication</title>
-    <link rel="stylesheet" href="/style.css">
-    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
+    <!-- Tailwind CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Tailwind config for Discord-like dark theme -->
+    <script>
+      tailwind.config = {
+        theme: {
+          extend: {
+            colors: {
+              bgDark: '#050816',
+              bgDarker: '#020817',
+              bgPanel: '#111827',
+              accent: '#5865F2',
+              accentSoft: '#4F46E5',
+              accentDanger: '#EF4444',
+              textPrimary: '#E5E7EB',
+              textMuted: '#9CA3AF',
+              borderSoft: 'rgba(148,163,253,0.12)'
+            },
+            boxShadow: {
+              'soft-panel': '0 18px 45px rgba(15,23,42,0.85)',
+              'soft-glow': '0 0 25px rgba(88,101,242,0.35)'
+            },
+            borderRadius: {
+              'xl2': '1.25rem'
+            }
+          }
+        }
+      }
+    </script>
+    <!-- Icons -->
+    <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css" rel="stylesheet">
 </head>
-<body>
-    <div class="app">
-        <!-- Login Screen -->
-        <div id="login-screen" class="login-screen">
-            <div class="login-container">
-                <div class="login-header">
-                    <i class="fas fa-comments"></i>
-                    <h1>Modern Chat</h1>
-                    <p>Connect and chat in real-time</p>
-                </div>
-                <form id="login-form" class="login-form">
-                    <div class="input-group">
-                        <i class="fas fa-user"></i>
-                        <input type="text" id="username" placeholder="Enter your username" required>
-                    </div>
-                    <div class="input-group">
-                        <i class="fas fa-hashtag"></i>
-                        <input type="text" id="room" placeholder="Room name (default: general)" value="general">
-                    </div>
-                    <button type="submit" class="login-btn">
-                        <i class="fas fa-sign-in-alt"></i>
-                        Join Chat
-                    </button>
-                </form>
+<body class="min-h-screen bg-bgDark text-textPrimary">
+    <div class="flex h-screen bg-gradient-to-br from-[#020817] via-[#020817] to-[#020817]">
+        <!-- Left rail (brand) -->
+        <aside class="hidden sm:flex flex-col items-center py-4 w-16 bg-[#050816]/80 border-r border-zinc-800/60 backdrop-blur-xl">
+            <div class="w-10 h-10 rounded-2xl bg-accent flex items-center justify-center shadow-soft-glow mb-4">
+                <i class="fas fa-comments text-white"></i>
             </div>
-        </div>
+            <div class="flex flex-col gap-3 mt-2 text-zinc-600 text-xs">
+                <i class="fa-solid fa-hashtag hover:text-accent cursor-pointer"></i>
+                <i class="fa-solid fa-user-group hover:text-accent cursor-pointer"></i>
+                <i class="fa-solid fa-gear hover:text-accent cursor-pointer mt-2"></i>
+            </div>
+        </aside>
 
-        <!-- Chat Interface -->
-        <div id="chat-interface" class="chat-interface hidden">
-            <!-- Header -->
-            <header class="chat-header">
-                <div class="header-info">
-                    <i class="fas fa-comments"></i>
-                    <h2>Modern Chat</h2>
-                    <span id="current-room" class="room-badge">#general</span>
+        <div class="flex-1 flex flex-col">
+            <!-- Login overlay -->
+            <div id="login-screen" class="fixed inset-0 z-30 flex items-center justify-center bg-black/70 backdrop-blur-xl">
+                <div class="w-full max-w-md bg-[#020817]/95 border border-borderSoft shadow-soft-panel rounded-2xl px-8 py-7 space-y-6">
+                    <div class="flex flex-col items-center gap-2">
+                        <div class="w-12 h-12 rounded-2xl bg-accent flex items-center justify-center shadow-soft-glow">
+                            <i class="fas fa-comments text-white"></i>
+                        </div>
+                        <div class="text-center">
+                            <h1 class="text-xl font-semibold tracking-wide">Modern Chat</h1>
+                            <p class="text-textMuted text-sm">Inspired by Discord. Join a room, chat, and share your screen or camera.</p>
+                        </div>
+                    </div>
+                    <form id="login-form" class="space-y-4">
+                        <div class="relative">
+                            <i class="fas fa-user text-textMuted absolute left-3 top-2.5 text-sm"></i>
+                            <input id="username" type="text"
+                                class="w-full pl-9 pr-3 py-2.5 bg-[#020817] border border-zinc-800/80 rounded-xl text-sm text-textPrimary placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+                                placeholder="Choose your username" required />
+                        </div>
+                        <div class="relative">
+                            <i class="fas fa-hashtag text-textMuted absolute left-3 top-2.5 text-sm"></i>
+                            <input id="room" type="text"
+                                class="w-full pl-9 pr-3 py-2.5 bg-[#020817] border border-zinc-800/80 rounded-xl text-sm text-textPrimary placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+                                placeholder="Room name (default: general)" value="general" />
+                        </div>
+                        <button type="submit"
+                            class="w-full flex items-center justify-center gap-2 py-2.5 bg-accent hover:bg-accentSoft text-white rounded-xl text-sm font-semibold shadow-soft-glow transition">
+                            <i class="fas fa-sign-in-alt"></i>
+                            Join the room
+                        </button>
+                    </form>
                 </div>
-                <div class="header-actions">
-                    <button id="leave-btn" class="leave-btn">
-                        <i class="fas fa-sign-out-alt"></i>
+            </div>
+
+            <!-- Top bar -->
+            <header class="flex items-center justify-between px-4 sm:px-6 py-3 bg-[#020817]/95 border-b border-zinc-800/60 backdrop-blur-xl">
+                <div class="flex items-center gap-3">
+                    <div class="sm:hidden w-9 h-9 rounded-2xl bg-accent flex items-center justify-center shadow-soft-glow">
+                        <i class="fas fa-comments text-white text-sm"></i>
+                    </div>
+                    <div>
+                        <div class="flex items-center gap-1.5">
+                            <i class="fas fa-hashtag text-zinc-500 text-xs"></i>
+                            <h2 class="text-sm sm:text-base font-semibold">Modern Chat</h2>
+                        </div>
+                        <span id="current-room" class="inline-flex items-center gap-1 text-[10px] text-textMuted">
+                            <i class="fa-regular fa-circle text-[6px] text-emerald-400"></i>
+                            #general
+                        </span>
+                    </div>
+                </div>
+                <div class="flex items-center gap-2">
+                    <div class="flex items-center gap-1.5" id="media-controls">
+                        <button id="share-screen-btn"
+                            class="w-9 h-9 flex items-center justify-center rounded-xl bg-[#020817] border border-zinc-700/80 text-zinc-400 hover:text-accent hover:border-accent hover:shadow-soft-glow transition"
+                            title="Share your screen">
+                            <i class="fas fa-display text-xs"></i>
+                        </button>
+                        <button id="share-camera-btn"
+                            class="w-9 h-9 flex items-center justify-center rounded-xl bg-[#020817] border border-zinc-700/80 text-zinc-400 hover:text-accent hover:border-accent hover:shadow-soft-glow transition"
+                            title="Share your camera">
+                            <i class="fas fa-video text-xs"></i>
+                        </button>
+                        <button id="stop-media-btn"
+                            class="w-9 h-9 flex items-center justify-center rounded-xl bg-[#020817] border border-zinc-800/80 text-zinc-600 hover:bg-accentDanger hover:text-white hover:border-accentDanger hover:shadow-soft-glow transition"
+                            title="Stop your share">
+                            <i class="fas fa-ban text-xs"></i>
+                        </button>
+                    </div>
+                    <button id="leave-btn"
+                        class="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-[#111827] border border-zinc-700 text-[10px] text-zinc-300 hover:bg-accentDanger hover:text-white hover:border-accentDanger transition">
+                        <i class="fas fa-sign-out-alt text-[10px]"></i>
                         Leave
                     </button>
                 </div>
             </header>
 
-            <div class="chat-container">
+            <div id="chat-interface" class="flex-1 flex overflow-hidden">
                 <!-- Sidebar -->
-                <aside class="chat-sidebar">
-                    <div class="sidebar-section">
-                        <h3><i class="fas fa-users"></i> Online Users</h3>
-                        <ul id="user-list" class="user-list">
-                            <!-- Users will be populated here -->
+                <aside class="hidden sm:flex flex-col w-60 bg-[#020817]/98 border-r border-zinc-800/80">
+                    <div class="px-4 py-3 border-b border-zinc-800/70">
+                        <h3 class="text-[10px] font-semibold text-zinc-500 tracking-[0.16em] uppercase mb-1 flex items-center gap-1.5">
+                            <i class="fas fa-users text-[9px] text-zinc-500"></i>
+                            Online
+                        </h3>
+                        <ul id="user-list" class="space-y-1.5 text-xs text-zinc-300">
+                            <!-- Users inserted here -->
                         </ul>
                     </div>
                 </aside>
 
-                <!-- Main Chat Area -->
-                <main class="chat-main">
-                    <div id="messages" class="messages">
-                        <!-- Messages will appear here -->
-                    </div>
-                    
-                    <form id="message-form" class="message-form">
-                        <div class="input-container">
-                            <input type="text" id="message-input" placeholder="Type your message..." maxlength="500">
-                            <button type="submit" id="send-btn" class="send-btn">
-                                <i class="fas fa-paper-plane"></i>
-                            </button>
+                <!-- Main area -->
+                <main class="flex-1 flex flex-col bg-[#020817]">
+                    <!-- Media area -->
+                    <section class="px-3 sm:px-5 pt-3 pb-2 border-b border-zinc-900/80 bg-gradient-to-b from-[#020817] via-[#020817] to-[#020817]/95">
+                        <div class="flex items-center justify-between mb-2">
+                            <div>
+                                <div class="flex items-center gap-1.5 text-[10px] font-semibold text-accent tracking-[0.16em] uppercase">
+                                    <i class="fas fa-broadcast-tower text-[9px]"></i>
+                                    Live Streams
+                                </div>
+                                <p class="text-[10px] text-textMuted">
+                                    When someone shares screen or camera, it appears here for everyone.
+                                </p>
+                            </div>
                         </div>
-                    </form>
+                        <div id="media-grid"
+                             class="grid grid-cols-1 xs:grid-cols-2 md:grid-cols-3 gap-2.5 auto-rows-[130px]">
+                            <!-- Media tiles -->
+                        </div>
+                    </section>
+
+                    <!-- Messages -->
+                    <section class="flex-1 flex flex-col">
+                        <div id="messages"
+                            class="flex-1 px-3 sm:px-5 py-3 space-y-2.5 overflow-y-auto text-[11px]">
+                            <!-- Messages -->
+                        </div>
+                        <form id="message-form"
+                              class="px-3 sm:px-5 pb-3 pt-2 bg-[#020817]/98 border-t border-zinc-900/80">
+                            <div class="flex items-center gap-2">
+                                <input id="message-input" type="text"
+                                    class="flex-1 px-3.5 py-2 rounded-2xl bg-[#020817] border border-zinc-800/80 text-[11px] text-textPrimary placeholder:text-zinc-600 focus:outline-none focus:ring-2 focus:ring-accent focus:border-transparent transition"
+                                    placeholder="Send a message to the room..." maxlength="500" />
+                                <button id="send-btn" type="submit"
+                                    class="w-9 h-9 flex items-center justify-center rounded-2xl bg-accent text-white text-xs shadow-soft-glow hover:bg-accentSoft transition disabled:opacity-40 disabled:cursor-not-allowed">
+                                    <i class="fas fa-paper-plane"></i>
+                                </button>
+                            </div>
+                        </form>
+                    </section>
                 </main>
             </div>
         </div>
@@ -570,17 +716,25 @@ body {
 .header-info {
     display: flex;
     align-items: center;
-    gap: 1rem;
+    gap: 0.85rem;
 }
 
 .header-info i {
-    font-size: 1.5rem;
+    font-size: 1.6rem;
     color: var(--accent-primary);
+    filter: drop-shadow(0 0 10px var(--glow));
+}
+
+.title-block {
+    display: flex;
+    flex-direction: column;
+    gap: 0.15rem;
 }
 
 .header-info h2 {
-    font-size: 1.5rem;
-    margin-right: 1rem;
+    font-size: 1.4rem;
+    font-weight: 700;
+    letter-spacing: 0.02em;
 }
 
 .room-badge {
@@ -592,17 +746,60 @@ body {
     font-weight: 500;
 }
 
+.media-actions {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-right: 0.75rem;
+}
+
+.icon-btn {
+    width: 38px;
+    height: 38px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    background: radial-gradient(circle at 0% 0%, rgba(88,101,242,0.18), var(--bg-tertiary));
+    color: var(--text-secondary);
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    transition: all 0.22s ease;
+    font-size: 0.95rem;
+}
+
+.icon-btn:hover {
+    color: var(--accent-primary);
+    border-color: var(--accent-primary);
+    box-shadow: 0 0 12px var(--glow);
+    transform: translateY(-1px);
+}
+
+.icon-btn.danger {
+    background: radial-gradient(circle at 0% 0%, rgba(237,66,69,0.22), var(--bg-tertiary));
+    color: var(--error);
+    border-color: rgba(237,66,69,0.4);
+}
+
+.icon-btn.danger:hover {
+    background: var(--error);
+    color: #fff;
+    box-shadow: 0 0 18px rgba(237,66,69,0.5);
+}
+
 .leave-btn {
     background: var(--error);
     color: white;
     border: none;
-    padding: 0.5rem 1rem;
-    border-radius: 8px;
+    padding: 0.55rem 1.15rem;
+    border-radius: 10px;
     cursor: pointer;
-    transition: all 0.3s ease;
+    transition: all 0.22s ease;
     display: flex;
     align-items: center;
-    gap: 0.5rem;
+    gap: 0.45rem;
+    font-size: 0.9rem;
+    font-weight: 500;
 }
 
 .leave-btn:hover {
@@ -668,6 +865,92 @@ body {
 
 /* Main Chat Area */
 .chat-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+}
+
+/* Media section */
+.media-section {
+    padding: 0.85rem 1.5rem 0.5rem;
+    background: radial-gradient(circle at top left, rgba(88,101,242,0.15), transparent),
+                var(--bg-secondary);
+    border-bottom: 1px solid rgba(255,255,255,0.02);
+    box-shadow: 0 10px 25px rgba(0,0,0,0.55);
+    backdrop-filter: blur(14px);
+}
+
+.media-header {
+    display: flex;
+    flex-direction: column;
+    gap: 0.1rem;
+    margin-bottom: 0.4rem;
+}
+
+.media-title {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    font-size: 0.9rem;
+    font-weight: 600;
+    color: var(--accent-primary);
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+}
+
+.media-subtitle {
+    font-size: 0.78rem;
+    color: var(--text-muted);
+}
+
+.media-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+    gap: 0.75rem;
+    margin-top: 0.25rem;
+}
+
+.media-tile {
+    position: relative;
+    background: radial-gradient(circle at top, rgba(88,101,242,0.12), rgba(15,17,21,1));
+    border-radius: 14px;
+    border: 1px solid rgba(255,255,255,0.04);
+    overflow: hidden;
+    box-shadow: 0 8px 22px rgba(0,0,0,0.7);
+    backdrop-filter: blur(10px);
+    display: flex;
+    flex-direction: column;
+}
+
+.media-tile video {
+    width: 100%;
+    height: 140px;
+    object-fit: cover;
+    background: #000;
+}
+
+.media-label {
+    position: absolute;
+    left: 8px;
+    bottom: 6px;
+    padding: 3px 9px;
+    font-size: 0.65rem;
+    border-radius: 999px;
+    background: rgba(10,11,13,0.88);
+    color: var(--accent-primary);
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+}
+
+.media-label span {
+    color: var(--text-secondary);
+    font-weight: 500;
+}
+
+/* Messages area */
+.messages-section {
     flex: 1;
     display: flex;
     flex-direction: column;
@@ -887,7 +1170,11 @@ function getClientJS(): string {
         this.username = '';
         this.room = 'general';
         this.isConnected = false;
-        
+
+        // WebRTC state
+        this.localStream = null;
+        this.peers = new Map(); // key: peerId (username or generated), value: { pc, stream, mediaType }
+
         this.initializeElements();
         this.bindEvents();
         this.checkWebSocketSupport();
@@ -909,6 +1196,12 @@ function getClientJS(): string {
         this.userList = document.getElementById('user-list');
         this.currentRoomSpan = document.getElementById('current-room');
         this.leaveBtn = document.getElementById('leave-btn');
+
+        // Media elements
+        this.shareScreenBtn = document.getElementById('share-screen-btn');
+        this.shareCameraBtn = document.getElementById('share-camera-btn');
+        this.stopMediaBtn = document.getElementById('stop-media-btn');
+        this.mediaGrid = document.getElementById('media-grid');
     }
 
     bindEvents() {
@@ -922,6 +1215,11 @@ function getClientJS(): string {
             }
         });
         this.leaveBtn.addEventListener('click', () => this.handleLeave());
+
+        // Media buttons
+        this.shareScreenBtn.addEventListener('click', () => this.startShare('screen'));
+        this.shareCameraBtn.addEventListener('click', () => this.startShare('camera'));
+        this.stopMediaBtn.addEventListener('click', () => this.stopAllMedia());
     }
 
     checkWebSocketSupport() {
@@ -1049,6 +1347,20 @@ function getClientJS(): string {
             case 'user-list':
                 this.updateUserList(JSON.parse(data.content));
                 break;
+
+            // WebRTC signaling: create ultra simple mesh so everyone ve la transmisión
+            case 'media-offer':
+                this.handleMediaOffer(data);
+                break;
+            case 'media-answer':
+                this.handleMediaAnswer(data);
+                break;
+            case 'media-candidate':
+                this.handleMediaCandidate(data);
+                break;
+            case 'media-stop':
+                this.handleMediaStop(data);
+                break;
         }
     }
 
@@ -1103,6 +1415,9 @@ function getClientJS(): string {
     }
 
     handleLeave() {
+        // Notificar fin de media si está compartiendo
+        this.stopAllMedia(true);
+
         if (this.ws && this.ws.readyState === WebSocket.OPEN) {
             const leaveMessage = {
                 type: 'leave'
@@ -1136,6 +1451,211 @@ function getClientJS(): string {
     toggleSendButton() {
         const hasMessage = this.messageInput.value.trim().length > 0;
         this.sendBtn.disabled = !hasMessage || !this.isConnected;
+    }
+
+    // MEDIA / WEBRTC (simple, pensado para demo en salas pequeñas)
+
+    async startShare(kind) {
+        if (!this.isConnected) {
+            this.showError('Connect to a room before sharing.');
+            return;
+        }
+        try {
+            if (this.localStream) {
+                this.showError('You are already sharing. Stop before starting a new share.');
+                return;
+            }
+
+            const constraints =
+                kind === 'screen'
+                    ? { video: true, audio: false }
+                    : { video: true, audio: true };
+
+            const getMedia =
+                kind === 'screen'
+                    ? navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices)
+                    : navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+
+            this.localStream = await getMedia(constraints);
+
+            // Create an outbound peer connection representing "broadcast"
+            const pc = this.createPeer('self-' + kind, kind, true);
+
+            this.localStream.getTracks().forEach((track) => {
+                pc.addTrack(track, this.localStream);
+            });
+
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+
+            this.sendWebSocketMessage({
+                type: 'media-offer',
+                mediaType: kind,
+                payload: JSON.stringify(offer),
+            });
+
+            this.renderLocalMediaTile(kind);
+        } catch (err) {
+            console.error(err);
+            this.showError('Unable to start ' + (kind === 'screen' ? 'screen share' : 'camera') + '.');
+        }
+    }
+
+    stopAllMedia(quiet = false) {
+        if (this.localStream) {
+            this.localStream.getTracks().forEach((t) => t.stop());
+            this.localStream = null;
+        }
+
+        // Close all peers
+        for (const [id, peer] of this.peers.entries()) {
+            if (peer.pc) {
+                peer.pc.close();
+            }
+        }
+        this.peers.clear();
+        this.mediaGrid.innerHTML = '';
+
+        if (!quiet) {
+            this.sendWebSocketMessage({
+                type: 'media-stop',
+            });
+        }
+    }
+
+    createPeer(id, mediaType, isOwner = false) {
+        const pc = new RTCPeerConnection({
+            iceServers: [
+                { urls: 'stun:stun.l.google.com:19302' },
+            ],
+        });
+
+        pc.onicecandidate = (event) => {
+            if (event.candidate) {
+                this.sendWebSocketMessage({
+                    type: 'media-candidate',
+                    mediaType,
+                    payload: JSON.stringify(event.candidate),
+                });
+            }
+        };
+
+        pc.ontrack = (event) => {
+            const [stream] = event.streams;
+            this.attachRemoteStream(id, stream, mediaType);
+        };
+
+        this.peers.set(id, { pc, mediaType, isOwner });
+
+        return pc;
+    }
+
+    async handleMediaOffer(data) {
+        const id = data.username + '-' + (data.mediaType || 'media');
+        const pc = this.createPeer(id, data.mediaType || 'screen', false);
+
+        const offer = JSON.parse(data.payload);
+        await pc.setRemoteDescription(new RTCSessionDescription(offer));
+
+        const answer = await pc.createAnswer();
+        await pc.setLocalDescription(answer);
+
+        this.sendWebSocketMessage({
+            type: 'media-answer',
+            mediaType: data.mediaType,
+            payload: JSON.stringify(answer),
+        });
+    }
+
+    async handleMediaAnswer(data) {
+        // Apply answer to all local owner peers
+        for (const [id, peer] of this.peers.entries()) {
+            if (peer.isOwner && peer.pc.signalingState === 'have-local-offer') {
+                const answer = JSON.parse(data.payload);
+                await peer.pc.setRemoteDescription(new RTCSessionDescription(answer));
+            }
+        }
+    }
+
+    async handleMediaCandidate(data) {
+        try {
+            const candidate = JSON.parse(data.payload);
+            for (const [, peer] of this.peers.entries()) {
+                await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
+            }
+        } catch (e) {
+            console.error('Error applying ICE candidate', e);
+        }
+    }
+
+    handleMediaStop(data) {
+        // Remote owner stopped sharing → clear UI
+        this.mediaGrid.innerHTML = '';
+        for (const [id, peer] of this.peers.entries()) {
+            if (!peer.isOwner) {
+                peer.pc.close();
+                this.peers.delete(id);
+            }
+        }
+    }
+
+    attachRemoteStream(id, stream, mediaType) {
+        let tile = document.querySelector(\`.media-tile[data-id="\${id}"]\`);
+        if (!tile) {
+            tile = document.createElement('div');
+            tile.className = 'media-tile';
+            tile.dataset.id = id;
+
+            const video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            video.muted = false;
+
+            const label = document.createElement('div');
+            label.className = 'media-label';
+            label.innerHTML = \`
+                <i class="fas \${mediaType === 'screen' ? 'fa-display' : 'fa-video'}"></i>
+                <span>\${mediaType === 'screen' ? 'Screen' : 'Camera'} • Live</span>
+            \`;
+
+            tile.appendChild(video);
+            tile.appendChild(label);
+            this.mediaGrid.appendChild(tile);
+        }
+
+        const videoEl = tile.querySelector('video');
+        videoEl.srcObject = stream;
+    }
+
+    renderLocalMediaTile(mediaType) {
+        if (!this.localStream) return;
+
+        const id = 'local-' + mediaType;
+        let tile = document.querySelector(\`.media-tile[data-id="\${id}"]\`);
+        if (!tile) {
+            tile = document.createElement('div');
+            tile.className = 'media-tile';
+            tile.dataset.id = id;
+
+            const video = document.createElement('video');
+            video.autoplay = true;
+            video.playsInline = true;
+            video.muted = true;
+
+            const label = document.createElement('div');
+            label.className = 'media-label';
+            label.innerHTML = \`
+                <i class="fas \${mediaType === 'screen' ? 'fa-display' : 'fa-video'}"></i>
+                <span>You • \${mediaType === 'screen' ? 'Screen' : 'Camera'}</span>
+            \`;
+
+            tile.appendChild(video);
+            tile.appendChild(label);
+            this.mediaGrid.prepend(tile);
+        }
+
+        const videoEl = tile.querySelector('video');
+        videoEl.srcObject = this.localStream;
     }
 
     scrollToBottom() {
